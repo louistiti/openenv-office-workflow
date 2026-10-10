@@ -1,0 +1,52 @@
+name: Verify anonymous immutable office image
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  anonymous:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: office-v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Read immutable digest from public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download office-v1 --pattern image-digest.txt --pattern submission-office-v1.json
+      - name: Anonymous image pull and all-task network replay
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$(mktemp -d)"
+          image="$(cat image-digest.txt)"
+          docker pull "$image"
+          docker inspect "$image" > image-public-inspect.json
+          docker run -d --name office-public -p 8767:8000 "$image"
+          trap 'docker logs office-public; docker rm -f office-public; rm -rf "$DOCKER_CONFIG"' EXIT
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8767/health && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8767/health
+          python live_replay.py --output replay-public.json
+          openenv validate --url http://127.0.0.1:8767 --level runtime --json > validation-public.json
+          curl -fsS http://127.0.0.1:8767/schema > schema-public.json
+          python - <<'PY'
+          import json
+          assert json.load(open('schema-public.json'))==json.load(open('submission-office-v1.json'))['schema']
+          assert json.load(open('validation-public.json'))['passed']
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: office-v1-anonymous-verification
+          path: |
+            image-public-inspect.json
+            replay-public.json
+            validation-public.json
+            schema-public.json
+      - name: Publish public verification reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload office-v1 image-public-inspect.json replay-public.json validation-public.json schema-public.json
