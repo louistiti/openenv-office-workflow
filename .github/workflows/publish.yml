@@ -1,0 +1,70 @@
+name: Build and verify office v1
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt pytest
+      - name: Independent seeded correctness and isolation tests
+        run: |
+          set -euo pipefail
+          python -m pytest -q test_environment.py | tee tests-linux.txt
+      - name: Build linux amd64 non-root image
+        run: docker build --platform linux/amd64 -t ghcr.io/louistiti/openenv-office-workflow:v1 .
+      - name: Container network replay, schema and SDK validation
+        run: |
+          set -euo pipefail
+          docker run -d --name office -p 8767:8000 ghcr.io/louistiti/openenv-office-workflow:v1
+          trap 'docker logs office; docker rm -f office' EXIT
+          for i in $(seq 1 90); do curl -fsS http://127.0.0.1:8767/health && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8767/health
+          python live_replay.py --output replay-container.json
+          openenv validate --url http://127.0.0.1:8767 --level runtime --json > validation-container.json
+          curl -fsS http://127.0.0.1:8767/schema > schema-container.json
+          python - <<'PY'
+          import json
+          from server import OfficeAction,OfficeObservation
+          data=json.load(open('schema-container.json'))
+          assert data['action']==OfficeAction.model_json_schema()
+          assert data['observation']==OfficeObservation.model_json_schema()
+          assert json.load(open('validation-container.json'))['passed']
+          PY
+          docker inspect ghcr.io/louistiti/openenv-office-workflow:v1 > image-inspect.json
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified immutable image and exact draft request
+        run: |
+          docker push ghcr.io/louistiti/openenv-office-workflow:v1
+          docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/louistiti/openenv-office-workflow:v1 > image-digest.txt
+          python prepare_submission.py --image "$(cat image-digest.txt)" --schema schema-container.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: office-v1-verification
+          path: |
+            tests-linux.txt
+            replay-container.json
+            validation-container.json
+            schema-container.json
+            image-inspect.json
+            image-digest.txt
+            submission-office-v1.json
+      - name: Publish reproducible verification release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create office-v1 --title 'Office Workflow Lab v1' --notes 'Built by Leon AI (https://github.com/leon-ai/leon) with Louistiti. Twelve fresh-seeded identities, six office/data families. Independent correctness tests, Linux container WebSocket replays and six pinned OpenEnv runtime checks passed. Two local quantized-Qwen smoke attempts: 1.0 and 0.55625, not learning or score evidence. Human approval required before Arena submission. Anonymous image validation is separate.' tests-linux.txt replay-container.json validation-container.json schema-container.json image-inspect.json image-digest.txt submission-office-v1.json
