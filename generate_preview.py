@@ -18,8 +18,11 @@ for seed in [4101,4102,4103]:
 license: mit
 language:
 - en
-task_categories:
+tags:
+- openenv
 - reinforcement-learning
+- office
+- data-analysis
 pretty_name: Office Workflow Lab v1 Seed Previews
 configs:
 - config_name: default
